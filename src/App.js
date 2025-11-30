@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageSquare, Wallet, Smile, Trophy, X } from 'lucide-react';
+import { MessageSquare, Wallet, Smile, X } from 'lucide-react';
+import { database } from './firebase';
+import { ref, push, onValue, set, remove, get } from 'firebase/database';
 
 export default function ZionMessenger() {
   const [walletConnected, setWalletConnected] = useState(false);
@@ -31,10 +33,52 @@ export default function ZionMessenger() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Listen to messages from Firebase
+  useEffect(() => {
+    if (walletConnected) {
+      const messagesRef = ref(database, 'messages');
+      const unsubscribe = onValue(messagesRef, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          const messagesList = Object.entries(data).map(([key, value]) => ({
+            id: key,
+            ...value
+          }));
+          setMessages(messagesList.sort((a, b) => a.timestamp - b.timestamp));
+        } else {
+          setMessages([]);
+        }
+      });
+      
+      return () => unsubscribe();
+    }
+  }, [walletConnected]);
+
+  // Listen to game requests from Firebase
+  useEffect(() => {
+    if (walletConnected) {
+      const requestsRef = ref(database, 'gameRequests');
+      const unsubscribe = onValue(requestsRef, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          const requestsList = Object.entries(data).map(([key, value]) => ({
+            id: key,
+            ...value
+          }));
+          setGameRequests(requestsList);
+        } else {
+          setGameRequests([]);
+        }
+      });
+      
+      return () => unsubscribe();
+    }
+  }, [walletConnected]);
+
   // Update countdown timer for game requests
   useEffect(() => {
     const interval = setInterval(() => {
-      setGameRequests(prev => [...prev]); // Force re-render for countdown
+      setGameRequests(prev => [...prev]);
     }, 1000);
     return () => clearInterval(interval);
   }, []);
@@ -53,7 +97,7 @@ export default function ZionMessenger() {
   const connectWallet = async (type) => {
     setIsLoading(true);
     
-    setTimeout(() => {
+    setTimeout(async () => {
       const mockAddress = '0x' + Math.random().toString(16).substr(2, 40);
       setWalletAddress(mockAddress);
       setWalletConnected(true);
@@ -62,14 +106,15 @@ export default function ZionMessenger() {
       const savedAnonNumber = localStorage.getItem(`anon_${mockAddress}`);
       
       if (savedAnonNumber) {
-        // This wallet already has an anon number
         setAnonNumber(parseInt(savedAnonNumber));
       } else {
-        // New wallet - assign next available anon number
-        const currentCount = parseInt(localStorage.getItem('anonCount') || '0');
+        const anonCountRef = ref(database, 'anonCount');
+        const snapshot = await get(anonCountRef);
+        const currentCount = snapshot.exists() ? snapshot.val() : 0;
+        
         setAnonNumber(currentCount);
         localStorage.setItem(`anon_${mockAddress}`, currentCount.toString());
-        localStorage.setItem('anonCount', (currentCount + 1).toString());
+        await set(anonCountRef, currentCount + 1);
       }
       
       // Load user data for this specific wallet
@@ -83,10 +128,6 @@ export default function ZionMessenger() {
         setRevealedNickname(savedNickname);
       }
       
-      // Load messages
-      const savedMessages = JSON.parse(localStorage.getItem('publicChatMessages') || '[]');
-      setMessages(savedMessages);
-      
       setIsLoading(false);
     }, 1500);
   };
@@ -94,8 +135,8 @@ export default function ZionMessenger() {
   const sendMessage = (emoji) => {
     if (!walletConnected) return;
     
-    const newMessage = {
-      id: Date.now().toString(),
+    const messagesRef = ref(database, 'messages');
+    push(messagesRef, {
       emoji: emoji,
       sender: hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`,
       timestamp: Date.now(),
@@ -103,56 +144,47 @@ export default function ZionMessenger() {
       replyTo: replyingTo ? {
         id: replyingTo.id,
         emoji: replyingTo.emoji,
+        text: replyingTo.text,
         sender: replyingTo.sender
       } : null
-    };
+    });
     
-    const updatedMessages = [...messages, newMessage];
-    setMessages(updatedMessages);
-    localStorage.setItem('publicChatMessages', JSON.stringify(updatedMessages));
     setReplyingTo(null);
   };
 
   const sendTextMessage = () => {
     if (!hasAccess || !messageInput.trim()) return;
     
-    const newMessage = {
-      id: Date.now().toString(),
+    const messagesRef = ref(database, 'messages');
+    push(messagesRef, {
       text: messageInput,
       sender: revealedNickname || `anon${anonNumber}`,
       timestamp: Date.now(),
       reactions: {},
       isText: true
-    };
+    });
     
-    const updatedMessages = [...messages, newMessage];
-    setMessages(updatedMessages);
-    localStorage.setItem('publicChatMessages', JSON.stringify(updatedMessages));
     setMessageInput('');
   };
 
   const addReaction = (messageId, emoji) => {
-    const updatedMessages = messages.map(msg => {
-      if (msg.id === messageId) {
-        const reactions = { ...msg.reactions };
-        const userKey = hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`;
-        if (reactions[emoji]) {
-          if (reactions[emoji].includes(userKey)) {
-            reactions[emoji] = reactions[emoji].filter(u => u !== userKey);
-            if (reactions[emoji].length === 0) delete reactions[emoji];
-          } else {
-            reactions[emoji] = [...reactions[emoji], userKey];
-          }
-        } else {
-          reactions[emoji] = [userKey];
-        }
-        return { ...msg, reactions };
-      }
-      return msg;
-    });
+    const messageRef = ref(database, `messages/${messageId}/reactions/${emoji}`);
+    const userKey = hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`;
     
-    setMessages(updatedMessages);
-    localStorage.setItem('publicChatMessages', JSON.stringify(updatedMessages));
+    get(messageRef).then((snapshot) => {
+      const currentReactions = snapshot.exists() ? snapshot.val() : [];
+      
+      if (currentReactions.includes(userKey)) {
+        const updated = currentReactions.filter(u => u !== userKey);
+        if (updated.length === 0) {
+          remove(messageRef);
+        } else {
+          set(messageRef, updated);
+        }
+      } else {
+        set(messageRef, [...currentReactions, userKey]);
+      }
+    });
   };
 
   const requestGame = () => {
@@ -161,44 +193,37 @@ export default function ZionMessenger() {
       return;
     }
 
-    const newRequest = {
-      id: Date.now().toString(),
-      challenger: `anon${anonNumber}`,
-      timestamp: Date.now()
-    };
+    const requestsRef = ref(database, 'gameRequests');
+    const newRequestRef = push(requestsRef);
     
-    const updatedRequests = [...gameRequests, newRequest];
-    setGameRequests(updatedRequests);
+    set(newRequestRef, {
+      challenger: hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`,
+      timestamp: Date.now()
+    });
+    
     setHasActiveRequest(true);
     
-    // Auto-remove after 5 minutes (300 seconds)
     setTimeout(() => {
-      setGameRequests(prev => {
-        const filtered = prev.filter(r => r.id !== newRequest.id);
-        // Check if user still has any active requests
-        const userHasRequest = filtered.some(r => r.challenger === `anon${anonNumber}`);
-        if (!userHasRequest) {
-          setHasActiveRequest(false);
-        }
-        return filtered;
-      });
-    }, 300000); // 5 minutes
+      remove(newRequestRef);
+      setHasActiveRequest(false);
+    }, 300000);
   };
 
   const acceptGame = (request) => {
+    const myIdentity = hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`;
+    
     setActiveGame({
       challenger: request.challenger,
-      opponent: `anon${anonNumber}`,
+      opponent: myIdentity,
       isChallenger: false
     });
     setBoard(Array(9).fill(null));
     setIsXNext(true);
     
-    // Remove the accepted request
-    setGameRequests(prev => prev.filter(r => r.id !== request.id));
+    const requestRef = ref(database, `gameRequests/${request.id}`);
+    remove(requestRef);
     
-    // Clear the requester's active request flag if it's their request
-    if (request.challenger === `anon${anonNumber}`) {
+    if (request.challenger === myIdentity) {
       setHasActiveRequest(false);
     }
   };
@@ -222,7 +247,6 @@ export default function ZionMessenger() {
           
           if (newWins >= 3 && !hasAccess) {
             setHasAccess(true);
-            // Prompt for nickname
             const chosenNickname = prompt('🎉 Congratulations! You unlocked the Secret Chat!\n\nChoose your nickname (max 8 characters, letters and numbers only):');
             
             if (chosenNickname) {
@@ -232,7 +256,7 @@ export default function ZionMessenger() {
                 localStorage.setItem(`nickname_${walletAddress}`, chosenNickname);
                 alert(`✨ Welcome to the Secret Chat, ${chosenNickname}! You can now send text messages and your nickname is visible!`);
               } else {
-                alert('Invalid nickname. Using default. You can set it later.');
+                alert('Invalid nickname. Using default.');
                 setRevealedNickname(`User${anonNumber}`);
                 localStorage.setItem(`nickname_${walletAddress}`, `User${anonNumber}`);
               }
@@ -303,7 +327,6 @@ export default function ZionMessenger() {
   if (!walletConnected) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-4 relative overflow-hidden">
-        {/* Matrix rain effect background */}
         <div className="absolute inset-0 opacity-20" style={{
           backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, #00ff00 2px, #00ff00 4px)',
           animation: 'matrix-rain 20s linear infinite'
@@ -383,7 +406,7 @@ export default function ZionMessenger() {
         </div>
       </div>
 
-      {/* Main Content - Fixed height container */}
+      {/* Main Content */}
       <div className="flex-1 flex overflow-hidden min-h-0">
         <div className="max-w-7xl mx-auto w-full flex flex-col min-h-0">
           {/* Messages Area */}
@@ -391,7 +414,7 @@ export default function ZionMessenger() {
             {messages.map(msg => (
               <div
                 key={msg.id}
-                className={`flex ${msg.sender === `anon${anonNumber}` ? 'justify-end' : 'justify-start'} group`}
+                className={`flex ${msg.sender === (hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`) ? 'justify-end' : 'justify-start'} group`}
               >
                 <div className="max-w-xs md:max-w-md">
                   <div className="flex items-center gap-2 mb-1">
@@ -403,7 +426,7 @@ export default function ZionMessenger() {
                   
                   <div
                     className={`px-4 py-3 rounded-2xl relative ${
-                      msg.sender === `anon${anonNumber}`
+                      msg.sender === (hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`)
                         ? 'bg-green-900 border-2 border-green-600 text-green-100'
                         : 'bg-gray-900 border-2 border-green-800 text-green-200'
                     }`}
@@ -429,7 +452,7 @@ export default function ZionMessenger() {
                             key={emoji}
                             onClick={() => addReaction(msg.id, emoji)}
                             className={`bg-gray-800 border ${
-                              users.includes(`anon${anonNumber}`) ? 'border-green-500' : 'border-green-800'
+                              users.includes(hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`) ? 'border-green-500' : 'border-green-800'
                             } px-2 py-0.5 rounded-full text-sm flex items-center gap-1 hover:border-green-400 transition-colors`}
                           >
                             {emoji} <span className="text-green-400 font-mono text-xs">{users.length}</span>
@@ -482,12 +505,12 @@ export default function ZionMessenger() {
                   return (
                     <div key={req.id} className="flex items-center justify-between bg-gray-800 border border-green-700 rounded-lg p-3">
                       <div>
-                        <span className="text-green-300 font-mono text-sm">{req.challenger} wants to play Tic-Tac-Toe!</span>
+                        <span className="text-green-300 font-mono text-sm">{req.challenger} wants to play Tic-Tac-Zion!</span>
                         <p className="text-xs text-green-600 font-mono mt-1">
                           ⏱️ Expires in {minutes}:{seconds.toString().padStart(2, '0')}
                         </p>
                       </div>
-                      {req.challenger !== `anon${anonNumber}` && req.challenger !== revealedNickname && (
+                      {req.challenger !== (hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`) && (
                         <button
                           onClick={() => acceptGame(req)}
                           className="bg-green-600 hover:bg-green-700 text-black font-bold py-1 px-4 rounded-lg text-sm"
@@ -495,7 +518,7 @@ export default function ZionMessenger() {
                           ACCEPT
                         </button>
                       )}
-                      {(req.challenger === `anon${anonNumber}` || req.challenger === revealedNickname) && (
+                      {req.challenger === (hasAccess && revealedNickname ? revealedNickname : `anon${anonNumber}`) && (
                         <span className="text-yellow-400 font-mono text-xs">Waiting...</span>
                       )}
                     </div>
