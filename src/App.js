@@ -58,12 +58,21 @@ export default function ZionMessenger() {
       setWalletAddress(mockAddress);
       setWalletConnected(true);
       
-      // Assign anon number
-      const currentCount = parseInt(localStorage.getItem('anonCount') || '0');
-      setAnonNumber(currentCount);
-      localStorage.setItem('anonCount', (currentCount + 1).toString());
+      // Assign anon number based on wallet address
+      const savedAnonNumber = localStorage.getItem(`anon_${mockAddress}`);
       
-      // Load user data
+      if (savedAnonNumber) {
+        // This wallet already has an anon number
+        setAnonNumber(parseInt(savedAnonNumber));
+      } else {
+        // New wallet - assign next available anon number
+        const currentCount = parseInt(localStorage.getItem('anonCount') || '0');
+        setAnonNumber(currentCount);
+        localStorage.setItem(`anon_${mockAddress}`, currentCount.toString());
+        localStorage.setItem('anonCount', (currentCount + 1).toString());
+      }
+      
+      // Load user data for this specific wallet
       const savedWins = parseInt(localStorage.getItem(`wins_${mockAddress}`) || '0');
       const savedNickname = localStorage.getItem(`nickname_${mockAddress}`) || '';
       
